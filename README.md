@@ -1,7 +1,7 @@
 # Google Spreadsheet Processing with Apache Airflow & DAG
 
 ### Tools Used:
-- Docker (with docker-compose.yaml)
+- Docker (with docker-compose.yaml & make sure to add the dependencies)
 - Apache Airflow
 - Python
 - Google Spreadsheet

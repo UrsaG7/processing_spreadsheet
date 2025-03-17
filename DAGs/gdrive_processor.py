@@ -1,5 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+#from airflow.operators.python import DummyOperator
 from datetime import datetime, timedelta
 import pandas as pd
 from googleapiclient.discovery import build
@@ -8,15 +9,14 @@ from airflow.providers.google.common.hooks.base_google import GoogleBaseHook
 import os
 import tempfile
 
-INPUT_FOLDER_ID = "Google_Drive_Folder_ID"
-OUTPUT_FOLDER_ID = "Google_Drive_Folder_ID"
-FINAL_FOLDER_ID = "Google_Drive_Folder_ID"
-
-COLUMNS_TO_DROP = ['col1','col2']
+INPUT_FOLDER_ID = "YOUR_FOLDER_ID"
+OUTPUT_FOLDER_ID = "YOUR_FOLDER_ID"
+FINAL_FOLDER_ID = "YOUR_FOLDER_ID"
+COLUMNS_DROP_FOLDER_ID = "YOUR_FOLDER_ID"
 
 def get_drive_service(**context):
-    """Create and return a Google Drive service object"""
-    context['ti'].log.info("Creating Google drive service")
+    """To create and return a Google Drive service"""
+    context['ti'].log.info("Creating Google Drive service...")
     try:
         hook = GoogleBaseHook(gcp_conn_id='google-drive-connection')
         credentials = hook.get_credentials()
@@ -28,7 +28,7 @@ def get_drive_service(**context):
         raise
 
 def check_excel_files(folder_id, **context):
-    """Check for Excel files from the input folder"""
+    """To check all Excel files from the folder"""
     context['ti'].log.info(f"Fetching Excel files from folder ID: {folder_id}")
     
     drive_service = get_drive_service(**context)
@@ -52,13 +52,14 @@ def check_excel_files(folder_id, **context):
 
     context['ti'].xcom_push(key='excel_file', value=files)
 
-def download_excel(**context):
+def download_excel(isColumnsCheck, **context):
+    """To download the files"""
 
     excel_files = context["ti"].xcom_pull(task_id='check_for_files', key='excel_file')
     
     if not excel_files:
-        context['ti'].log.info("No files Detected. Exiting...")
-        return {"There's no file"}
+        context['ti'].log.info("No files Detected. Exiting.")
+        return
     
     drive_service = get_drive_service(**context)
 
@@ -85,10 +86,43 @@ def download_excel(**context):
             except Exception as e:
                 context['ti'].log.error(f"Failed to download {file_name}: {str(e)}")
 
-        context['ti'].xcom.push(key='downloaded_excel_files', value=downloaded_files)
+        
+        if isColumnsCheck:
+            context['ti'].xcom.push(key='columns_list', value=downloaded_files)
+        else:   
+            context['ti'].xcom.push(key='downloaded_excel_files', value=downloaded_files)
 
-def process_excel_file(**context):
+def read_columns_list(**context):
+    """To read the file containing columns to be dropped, and push it with xcom"""
+    columns_list = context['ti'].xcom.pull(task_id='get_file', key='columns_list')
+
+    if not columns_list:
+        context['ti'].log.info('There are no file inside the directory, Exitting!')
+        return
+        
+    col_list = []
+    
+    for file in columns_list:
+        context['ti'].log.info("Processing Excel data...")
+        try:
+            input_path = file['input_path']
+
+            df = pd.read_excel(input_path)
+
+            for i in df['columns_to_drop']:
+                col_list.append(i)
+
+        except Exception as e:
+            context['ti'].log.error(f'{e}')
+
+    context['ti'].xcom.push(key='columns_to_drop_list', value=col_list)
+
+def process_excel_file(isColumnsCheck=False,**context):
+    """To process the files by dropping columns based on the list provided by read_columns_list"""
     downloaded_files = context['ti'].xcom.pull(task_id='get_file', key='downloaded_excel_files')
+
+    if isColumnsCheck:
+        columns_to_drop = context['ti'].xcom.pull(task_id='read_columns_list', key='columns_to_drop_list')
 
     if not downloaded_files:
         context['ti'].log.info('There are no file inside the directory, Exitting!')
@@ -110,19 +144,19 @@ def process_excel_file(**context):
 
             dataframes.append(df)
             
-            existing_columns = [col for col in COLUMNS_TO_DROP if col in df.columns]
-
+            existing_columns = [col for col in columns_to_drop if col in df.columns]
+            
             if existing_columns:
                 df = df.drop(columns=existing_columns)
                 context['ti'].log.info(f"Dropped columns: {existing_columns}")
             else:
                 context['ti'].log.info("None of the specified columns found in the file")
-
+            
             df.to_excel(output_path, index=False)
             context['ti'].log.info(f"New dataframe shape: {df.shape}")
             context['ti'].log.info(f"Saved processed file to {output_path}")
             
-            #File Information for uploading <<<<<<<<<<<<
+            # This is the information necessary in order for the file to be uploaded later
             file_metadata = {
                 "name": f"processed_{file_name}",
                 "parents": [OUTPUT_FOLDER_ID],
@@ -148,6 +182,7 @@ def process_excel_file(**context):
     context['ti'].xcom.push(key='processed_merged_dataframes', value=dataframes)
 
 def upload_excel(isMerging=False,**context):
+    """To upload the files into the destination folder"""
     context['ti'].log.info("Uploading excel to destination folder in Google Drive")
 
     drive_service = get_drive_service(**context)
@@ -176,7 +211,7 @@ def upload_excel(isMerging=False,**context):
     return {'Upload Complete!'}
 
 def merge_all_files(**context):
-    
+    """To merge the processed files into one single file"""
     dataframes = context['ti'].xcom.pull(task_id='process_file', key='processed_merged_dataframes')
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -222,21 +257,20 @@ def merge_all_files(**context):
 
 
 default_args = {
-    'owner': '@meandmyself',
+    'owner': 'airflow',
     'depends_on_past': False,
     'start_date': datetime(2025, 3, 1),
     'email_on_failure': False,
     'email_on_retry': False,
     'retries': 3,
-    'retry_delay': timedelta(minutes=1),
+    'retry_delay': timedelta(seconds=30),
 }
 
-# Create DAG
 dag = DAG(
     'gdrive_excel_processor',
     default_args=default_args,
-    description='Process Excel files from Google Drive by dropping specified columns and merge the processed files into one file',
-    schedule_interval=timedelta(days=1),
+    description='Process Excel files from Google Drive by dropping specified columns',
+    schedule_interval=timedelta(hours=1),
     catchup=False,
 )
 
@@ -255,7 +289,7 @@ download_file = PythonOperator(
     dag=dag
 )
 
-process_excel_file_original = PythonOperator(
+process_excel_file = PythonOperator(
     task_id='process_file',
     python_callable=process_excel_file,
     provide_context=True,
@@ -269,7 +303,30 @@ upload_file = PythonOperator(
     dag=dag
 )
 
-check_processed_file = PythonOperator(
+check_parameters_columns = PythonOperator(
+    task_id='check_columns_list',
+    python_callable=check_excel_files,
+    op_kwargs={'folder_id':COLUMNS_DROP_FOLDER_ID},
+    provide_context=True,
+    dag=dag
+)
+
+download_columns_list = PythonOperator(
+    task_id='get_processed_file',
+    python_callable=download_excel,
+    op_kwargs={'isColumnsCheck':True},
+    provide_context=True,
+    dag=dag
+)
+
+read_columns_drop_list = PythonOperator(
+    task_id='read_columns_list',
+    python_callable=read_columns_list,
+    provide_context=True,
+    dag=dag
+)
+
+check_processed_file_after = PythonOperator(
     task_id='check_processed_file',
     python_callable=check_excel_files,
     op_kwargs={'folder_id':OUTPUT_FOLDER_ID},
@@ -300,4 +357,4 @@ upload_merged_file = PythonOperator(
 )
 
 
-check_file >> download_file >> process_excel_file_original >> upload_file >> check_processed_file >> download_processed_file >> merge_processed_file >> upload_merged_file
+check_file >> download_file >>  check_parameters_columns >> download_columns_list >> read_columns_drop_list >> process_excel_file >> upload_file >> check_processed_file_after >> download_processed_file >> merge_processed_file >> upload_merged_file
